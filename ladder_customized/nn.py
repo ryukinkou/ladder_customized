@@ -102,9 +102,11 @@ class ContrastNorm(object):
         self.epsilon = np.float32(epsilon)
 
     def apply(self, data, copy=False):
+        # 复制保留一份data
         if copy:
             data = np.copy(data)
         data_shape = data.shape
+        print(data_shape)
         if len(data.shape) > 2:
             data = data.reshape(data.shape[0], np.product(data.shape[1:]))
 

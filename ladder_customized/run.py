@@ -10,10 +10,9 @@ import time
 import numpy
 from argparse import ArgumentParser, Action
 from itertools import izip, product, tee
-from fuel import config
 
 # 自定义类
-from utils import ShortPrinting, prepare_dir, load_df, DummyLoop
+from utils import prepare_dir, load_df
 from fuel.datasets import MNIST, CIFAR10
 from nn import ZCA, ContrastNorm
 
@@ -21,12 +20,10 @@ from nn import ZCA, ContrastNorm
 logger = logging.getLogger('main')
 
 
-# 属性类dict，底层还是dict
+# 属性类dict，底层是dict
 class AttributeDict(dict):
-    # getitem重命名为getattr
     __getattr__ = dict.__getitem__
 
-    # setitem重命名为setitem，行为不变
     def __setattr__(self, a, b):
         self.__setitem__(a, b)
 
@@ -50,7 +47,7 @@ def prepare_dir(save_to, results_dir='results'):
 # 读取、记录参数
 def load_and_log_params(cli_params):
     cli_params = AttributeDict(cli_params)
-    # 如果有load_from参数
+    # 如果有load_from参数，说明参数是有文件里面读取的，文件格式为hdf
     if cli_params.get('load_from'):
         # load_from值 + params组成完整地址
         # string => dict
@@ -63,6 +60,8 @@ def load_and_log_params(cli_params):
                 p[key] = None
         new_params = cli_params
         loaded = True
+
+    # 如果没有load from参数，直接封装一下cli_params
     else:
         p = cli_params
         new_params = {}
@@ -152,25 +151,25 @@ def setup_data(p, test_set=False):
             'Need %d whitening dimensions, not %d' % (numpy.product(in_dim),
                                                       p.whiten_zca)
 
-    # 归一化参数如果不为空
+    # 归一化参数如果不为空，创建归一化类
     cnorm = ContrastNorm(p.contrast_norm) if p.contrast_norm != 0 else None
 
     def get_data(d, i):
         data = d.get_data(request=i)[d.sources.index('features')]
 
         # Fuel provides Cifar in uint8, convert to float32
+        # 检查data集合中的item是否符合float32类型
         data = numpy.require(data, dtype=numpy.float32)
+        # TODO ContrastNorm.apply
         return data if cnorm is None else cnorm.apply(data)
 
-    # if p.whiten_zca > 0:
-    #     logger.info('Whitening using %d ZCA components' % p.whiten_zca)
-    #     whiten = ZCA()
-    #     whiten.fit(p.whiten_zca, get_data(d.train, d.train_ind))
-    # else:
-    #     whiten = None
-    in_dim = 0
-    whiten = 0
-    cnorm = 0
+    if p.whiten_zca > 0:
+        logger.info('Whitening using %d ZCA components' % p.whiten_zca)
+        # TODO 解读ZCA
+        whiten = ZCA()
+        whiten.fit(p.whiten_zca, get_data(d.train, d.train_ind))
+    else:
+        whiten = None
 
     return in_dim, d, whiten, cnorm
 
@@ -188,9 +187,13 @@ def train(cli_params):
     logger.info('Logging into %s' % logfile)
     # log设定相关，无视 END
 
+    # 读取并记录命令行参数，参数都塞入p里面
     p, loaded = load_and_log_params(cli_params)
 
+    # 根据参数和环境变量FUEL_DATA_PATH读取数据
     in_dim, data, whiten, cnorm = setup_data(p, test_set=False)
+
+    #
     if not loaded:
         # Set the zero layer to match input dimensions
         p.encoder_layers = (in_dim,) + p.encoder_layers
