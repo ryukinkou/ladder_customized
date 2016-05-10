@@ -8,13 +8,20 @@ import functools
 import logging
 import time
 import numpy
+import theano
+from theano.tensor.type import TensorType
 from argparse import ArgumentParser, Action
 from itertools import izip, product, tee
+from blocks.graph import ComputationGraph
+from blocks.filter import VariableFilter
+from blocks.roles import PARAMETER
+from blocks.algorithms import GradientDescent, Adam
 
 # 自定义类
 from utils import prepare_dir, load_df
 from fuel.datasets import MNIST, CIFAR10
 from nn import ZCA, ContrastNorm
+from ladder import LadderAE
 
 # 全局logger
 logger = logging.getLogger('main')
@@ -103,7 +110,7 @@ def setup_data(p, test_set=False):
         training_set_size = p.unlabeled_samples
 
     # 选出mnist数据集里面的train子集
-    train_set = dataset_class(["train"])
+    train_set = dataset_class("train")
 
     # Make sure the MNIST data is in right format
     # 对minst进行数据检查，查看是否所有值都在0-1之间且都为float
@@ -165,13 +172,36 @@ def setup_data(p, test_set=False):
 
     if p.whiten_zca > 0:
         logger.info('Whitening using %d ZCA components' % p.whiten_zca)
-        # TODO 解读ZCA
+        # TODO ZCA
         whiten = ZCA()
         whiten.fit(p.whiten_zca, get_data(d.train, d.train_ind))
     else:
         whiten = None
 
     return in_dim, d, whiten, cnorm
+
+
+def setup_model(p):
+    ladder = LadderAE(p)
+    # Setup inputs
+    input_type = TensorType('float32', [False] * (len(p.encoder_layers[0]) + 1))
+    x_only = input_type('features_unlabeled')
+    x = input_type('features_labeled')
+    y = theano.tensor.lvector('targets_labeled')
+    ladder.apply(x, y, x_only)
+
+    # Load parameters if requested
+    if p.get('load_from'):
+        with open(p.load_from + '/trained_params.npz') as f:
+            loaded = numpy.load(f)
+            cg = ComputationGraph([ladder.costs.total])
+            current_params = VariableFilter(roles=[PARAMETER])(cg.variables)
+            logger.info('Loading parameters: %s' % ', '.join(loaded.keys()))
+            for param in current_params:
+                assert param.get_value().shape == loaded[param.name].shape
+                param.set_value(loaded[param.name])
+
+    return ladder
 
 
 # 训练分类器
@@ -198,8 +228,25 @@ def train(cli_params):
         # Set the zero layer to match input dimensions
         p.encoder_layers = (in_dim,) + p.encoder_layers
 
-    # ladder = setup_model(p)
+    ladder = setup_model(p)
 
+    # Training
+    all_params = ComputationGraph([ladder.costs.total]).parameters
+    logger.info('Found the following parameters: %s' % str(all_params))
+
+    # all_params里面有一堆参数名类似的东西具体还不知道有什么作用
+
+    # 用于batch norm的参数
+    # Fetch all batch normalization updates. They are in the clean path.
+    bn_updates = ComputationGraph([ladder.costs.class_clean]).updates
+    assert 'counter' in [u.name for u in bn_updates.keys()], \
+        'No batch norm params in graph - the graph has been cut?'
+
+    training_algorithm = GradientDescent(
+        cost=ladder.costs.total, params=all_params,
+        step_rule=Adam(learning_rate=ladder.lr))
+    # In addition to actual training, also do BN variable approximations
+    training_algorithm.add_updates(bn_updates)
 
 
 

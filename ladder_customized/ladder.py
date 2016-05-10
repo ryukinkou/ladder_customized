@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 import logging
 
 import numpy as np
@@ -25,18 +27,24 @@ floatX = theano.config.floatX
 class LadderAE():
     def __init__(self, p):
         self.p = p
+        # 是否转置初始权重矩阵
         self.init_weights_transpose = False
+        # 学习几率
         self.default_lr = p.lr
+        # OrderedDict顺序字典
         self.shareds = OrderedDict()
         self.rstream = RandomStreams(seed=p.seed)
         self.rng = np.random.RandomState(seed=p.seed)
 
+        # 编码网络的层数要大于1
         n_layers = len(p.encoder_layers)
         assert n_layers > 1, "Need to define encoder layers"
+        # 去噪网络的x，每一层都有一个潜变量作为去噪cost的x值，所以数量等于层数
         assert n_layers == len(p.denoising_cost_x), (
             "Number of denoising costs does not match with %d layers: %s" %
             (n_layers, str(p.denoising_cost_x)))
 
+        # 除了x本身已经是tuble以外，其他的类型都要复制n_layers份，并放入tuple中。
         def one_to_all(x):
             """ (5.,) -> 5 -> (5., 5., 5.)
                 ('relu',) -> 'relu' -> ('relu', 'relu', 'relu')
@@ -55,10 +63,12 @@ class LadderAE():
         p.f_local_noise_std = one_to_all(p.f_local_noise_std)
         acts = one_to_all(p.get('act', 'relu'))
 
+        # nn的层数与decoder的层数匹配
         assert n_layers == len(p.decoder_spec), "f and g need to match"
         assert (n_layers == len(acts)), (
             "Not enough activations given. Requires %d. Got: %s" %
             (n_layers, str(acts)))
+        # 为激活配置添加最后一层softmax层
         acts = acts[:-1] + ('softmax',)
 
         def parse_layer(spec):
@@ -67,16 +77,25 @@ class LadderAE():
                 5      -> ('fc', 5)
                 'convv:3:2:2' -> ('convv', [3,2,2])
             """
+            # 配置中只写了参数配置（纯数字）的情况默认配置为fc层
             if type(spec) is not str:
                 return "fc", spec
+            # 卷积层配置？
             spec = spec.split(':')
+            # spec开头的str作为参数的配置类型（fc/conv）,如果spec只有一个值，默认配置为fc
             l_type = spec.pop(0) if len(spec) >= 2 else "fc"
             spec = map(int, spec)
+            # 拨壳
             spec = spec[0] if len(spec) == 1 else spec
             return l_type, spec
 
+        # map，iterable中每个元素都应用parse_layer
         enc = map(parse_layer, p.encoder_layers)
+
+        # 三个数组依次取一个值组成新的元素，并给予编号。
         self.layers = list(enumerate(zip(enc, p.decoder_spec, acts)))
+
+        # END 模型设定完成
 
     def weight(self, init, name, cast_float32=True, for_conv=False):
         weight = self.shared(init, name, cast_float32, role=WEIGHT)

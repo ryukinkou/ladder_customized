@@ -4,7 +4,7 @@ M Berglund, and T Raiko.
 
 #### Required libraries
 ##### Install Theano, Blocks Stable 0.0.1, Fuel Stable 0.0.1
-Refer to the [Blocks installation instructions]() for
+Refer to the [Blocks installation instructions](http://blocks.readthedocs.org/en/latest/setup.html) for
 details but use tag v0.0.1 instead. Something along:
 ```
 pip install git+git://github.com/mila-udem/blocks.git@v0.0.1

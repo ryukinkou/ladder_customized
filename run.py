@@ -38,7 +38,7 @@ from nn import ApproxTestMonitoring, FinalTestMonitoring, TestMonitoring
 from nn import LRDecay
 from ladder import LadderAE
 
-# Transformer
+
 class Whitening(Transformer):
     """ Makes a copy of the examples in the underlying dataset and whitens it
         if necessary.
@@ -48,16 +48,9 @@ class Whitening(Transformer):
         super(Whitening, self).__init__(data_stream,
                                         iteration_scheme=iteration_scheme,
                                         **kwargs)
-
-        # data_stream is type of AbstractDataStream, impl by fuel?
-        # slice cut sequences from the beginning to <data_stream.dataset.num_examples by fuel >
-        # warning: data and self.data is different.
         data = data_stream.get_data(slice(data_stream.dataset.num_examples))
         self.data = []
-
-        # zip is an automatically matching function
         for s, d in zip(self.sources, data):
-            # features setting data pack
             if 'features' == s:
                 # Fuel provides Cifar in uint8, convert to float32
                 d = numpy.require(d, dtype=numpy.float32)
@@ -66,7 +59,6 @@ class Whitening(Transformer):
                 if whiten is not None:
                     d = whiten.apply(d)
                 self.data += [d]
-            # targets data
             elif 'targets' == s:
                 d = unify_labels(d)
                 self.data += [d]
@@ -245,7 +237,7 @@ def setup_data(p, test_set=False):
     if p.get('unlabeled_samples') is not None:
         training_set_size = p.unlabeled_samples
 
-    train_set = dataset_class(["train"])
+    train_set = dataset_class("train")
 
     # Make sure the MNIST data is in right format
     if p.dataset == 'mnist':
@@ -517,11 +509,8 @@ def train(cli_params):
     return df
 
 if __name__ == "__main__":
-
-    # enable logging
     logging.basicConfig(level=logging.INFO)
 
-    # define some useful lambda formula
     rep = lambda s: s.replace('-', ',')
     chop = lambda s: s.split(',')
     to_int = lambda ss: [int(s) for s in ss if s.isdigit()]
