@@ -23,6 +23,8 @@ from nn import maxpool_2d, global_meanpool_2d, BNPARAM
 logger = logging.getLogger('main.model')
 floatX = theano.config.floatX
 
+theano.sandbox.cuda.use('gpu0')
+
 
 class LadderAE():
     def __init__(self, p):

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 import functools
 import logging
@@ -39,136 +40,158 @@ from nn import LRDecay
 from ladder import LadderAE
 
 
-class Whitening(Transformer):
-    """ Makes a copy of the examples in the underlying dataset and whitens it
-        if necessary.
-    """
-    def __init__(self, data_stream, iteration_scheme, whiten, cnorm=None,
-                 **kwargs):
-        super(Whitening, self).__init__(data_stream,
-                                        iteration_scheme=iteration_scheme,
-                                        **kwargs)
-        data = data_stream.get_data(slice(data_stream.dataset.num_examples))
-        self.data = []
-        for s, d in zip(self.sources, data):
-            if 'features' == s:
-                # Fuel provides Cifar in uint8, convert to float32
-                d = numpy.require(d, dtype=numpy.float32)
-                if cnorm is not None:
-                    d = cnorm.apply(d)
-                if whiten is not None:
-                    d = whiten.apply(d)
-                self.data += [d]
-            elif 'targets' == s:
-                d = unify_labels(d)
-                self.data += [d]
-            else:
-                raise Exception("Unsupported Fuel target: %s" % s)
+# 属性类dict，底层是dict
+class AttributeDict(dict):
+    __getattr__ = dict.__getitem__
 
-    def get_data(self, request=None):
-        return (s[request] for s in self.data)
+    def __setattr__(self, a, b):
+        self.__setitem__(a, b)
 
 
-class SemiDataStream(Transformer):
-    """ Combines two datastreams into one such that 'target' source (labels)
-        is used only from the first one. The second one is renamed
-        to avoid collision. Upon iteration, the first one is repeated until
-        the second one depletes.
-        """
-    def __init__(self, data_stream_labeled, data_stream_unlabeled, **kwargs):
-        super(Transformer, self).__init__(**kwargs)
-        self.ds_labeled = data_stream_labeled
-        self.ds_unlabeled = data_stream_unlabeled
-        # Rename the sources for clarity
-        self.ds_labeled.sources = ('features_labeled', 'targets_labeled')
-        # Rename the source for input pixels and hide its labels!
-        self.ds_unlabeled.sources = ('features_unlabeled',)
-
-    @property
-    def sources(self):
-        if hasattr(self, '_sources'):
-            return self._sources
-        return self.ds_labeled.sources + self.ds_unlabeled.sources
-
-    @sources.setter
-    def sources(self, value):
-        self._sources = value
-
-    def close(self):
-        self.ds_labeled.close()
-        self.ds_unlabeled.close()
-
-    def reset(self):
-        self.ds_labeled.reset()
-        self.ds_unlabeled.reset()
-
-    def next_epoch(self):
-        self.ds_labeled.next_epoch()
-        self.ds_unlabeled.next_epoch()
-
-    def get_epoch_iterator(self, **kwargs):
-        unlabeled = self.ds_unlabeled.get_epoch_iterator(**kwargs)
-        labeled = self.ds_labeled.get_epoch_iterator(**kwargs)
-        assert type(labeled) == type(unlabeled)
-
-        return imap(self.mergedicts, cycle(labeled), unlabeled)
-
-    def mergedicts(self, x, y):
-        return dict(list(x.items()) + list(y.items()))
+# 创建目录
+def prepare_dir(save_to, results_dir='results'):
+    # 合并两个文件／目录路径
+    base = os.path.join(results_dir, save_to)
+    # 目录名 + 数字的方式为目录命名，创建若失败，数字+1继续创建直到成功
+    suffix = 0
+    while True:
+        name = base + str(suffix)
+        try:
+            os.makedirs(name)
+            break
+        except OSError:
+            suffix += 1
+    return name
 
 
-def unify_labels(y):
-    """ Work-around for Fuel bug where MNIST and Cifar-10
-    datasets have different dimensionalities for the targets:
-    e.g. (50000, 1) vs (60000,) """
-    yshape = y.shape
-    y = y.flatten()
-    assert y.shape[0] == yshape[0]
-    return y
+# 读取、记录参数
+def load_and_log_params(cli_params):
+    cli_params = AttributeDict(cli_params)
+    # 如果有load_from参数，说明参数是有文件里面读取的，文件格式为hdf
+    if cli_params.get('load_from'):
+        # load_from值 + params组成完整地址
+        # string => dict
+        p = load_df(cli_params.load_from, 'params').to_dict()[0]
+        # dict => AttributeDict
+        p = AttributeDict(p)
 
+        for key in cli_params.iterkeys():
+            if key not in p:
+                p[key] = None
+        new_params = cli_params
+        loaded = True
 
-def make_datastream(dataset, indices, batch_size,
-                    n_labeled=None, n_unlabeled=None,
-                    balanced_classes=True, whiten=None, cnorm=None,
-                    scheme=ShuffledScheme):
-    if n_labeled is None or n_labeled == 0:
-        n_labeled = len(indices)
-    if batch_size is None:
-        batch_size = len(indices)
-    if n_unlabeled is None:
-        n_unlabeled = len(indices)
-    assert n_labeled <= n_unlabeled, 'need less labeled than unlabeled'
-
-    if balanced_classes and n_labeled < n_unlabeled:
-        # Ensure each label is equally represented
-        logger.info('Balancing %d labels...' % n_labeled)
-        all_data = dataset.data_sources[dataset.sources.index('targets')]
-        y = unify_labels(all_data)[indices]
-        n_classes = y.max() + 1
-        assert n_labeled % n_classes == 0
-        n_from_each_class = n_labeled / n_classes
-
-        i_labeled = []
-        for c in range(n_classes):
-            i = (indices[y == c])[:n_from_each_class]
-            i_labeled += list(i)
+    # 如果没有load from参数，直接封装一下cli_params
     else:
-        i_labeled = indices[:n_labeled]
+        p = cli_params
+        new_params = {}
+        loaded = False
 
-    # Get unlabeled indices
-    i_unlabeled = indices[:n_unlabeled]
+        # Make dseed seed unless specified explicitly
+        # dseed为空而seed不为空时，dseed复制为seed
+        if p.get('dseed') is None and p.get('seed') is not None:
+            p['dseed'] = p['seed']
 
-    ds = SemiDataStream(
-        data_stream_labeled=Whitening(
-            DataStream(dataset),
-            iteration_scheme=scheme(i_labeled, batch_size),
-            whiten=whiten, cnorm=cnorm),
-        data_stream_unlabeled=Whitening(
-            DataStream(dataset),
-            iteration_scheme=scheme(i_unlabeled, batch_size),
-            whiten=whiten, cnorm=cnorm)
-    )
-    return ds
+    # log相关
+    logger.info('== COMMAND LINE ==')
+    logger.info(' '.join(sys.argv))
+
+    logger.info('== PARAMETERS ==')
+    for k, v in p.iteritems():
+        if new_params.get(k) is not None:
+            p[k] = new_params[k]
+            replace_str = "<- " + str(new_params.get(k))
+        else:
+            replace_str = ""
+        logger.info(" {:20}: {:<20} {}".format(k, v, replace_str))
+    return p, loaded
+
+
+# 设置数据
+def setup_data(p, test_set=False):
+
+    # CIFAR10与MNIST都是封装过后的HDF5数据集
+    # p.dataset为命令行传入的参数，在cifar10与mnist之间选择其一
+    dataset_class, training_set_size = {
+        'cifar10': (CIFAR10, 40000),
+        'mnist': (MNIST, 50000),
+    }[p.dataset]
+
+    # 可以通过命令行指定为标注样本的大小
+    # Allow overriding the default from command line
+    if p.get('unlabeled_samples') is not None:
+        training_set_size = p.unlabeled_samples
+
+    # 选出mnist数据集里面的train子集
+    train_set = dataset_class("train")
+
+    # Make sure the MNIST data is in right format
+    # 对minst进行数据检查，查看是否所有值都在0-1之间且都为float
+    if p.dataset == 'mnist':
+        # features大小为60000＊1＊28＊28，num_examples*channel*height*weight，minst为灰度图片所以channel=1
+        d = train_set.data_sources[train_set.sources.index('features')]
+        assert numpy.all(d <= 1.0) and numpy.all(d >= 0.0), \
+            'Make sure data is in float format and in range 0 to 1'
+
+    # 随机打乱样本顺序
+    # Take all indices and permutate them
+    all_ind = numpy.arange(train_set.num_examples)
+    if p.get('dseed'):
+        # 通过dseed制作一个随机器，用于打乱样本编号
+        rng = numpy.random.RandomState(seed=p.dseed)
+        rng.shuffle(all_ind)
+
+    d = AttributeDict()
+
+    # Choose the training set
+    d.train = train_set
+    # 此时index应该都被打乱
+    # 取出前training_set_size个数的样本做为训练集（的index）
+    d.train_ind = all_ind[:training_set_size]
+
+    # 选出一部分数据作为验证集
+    # Then choose validation set from the remaining indices
+    d.valid = train_set
+    # 全部的数据集中去掉训练用的样本，剩下的作为验证集
+    d.valid_ind = numpy.setdiff1d(all_ind, d.train_ind)[:p.valid_set_size]
+
+    logger.info('Using %d examples for validation' % len(d.valid_ind))
+
+    # 如果有测试数据的话，生成测试数据的index
+    # Only touch test data if requested
+    if test_set:
+        d.test = dataset_class("test")
+        d.test_ind = numpy.arange(d.test.num_examples)
+
+    # Setup optional whitening, only used for Cifar-10
+    # 计算特征值的维度，shape[1:]：获取第一个样本的维度
+    in_dim = train_set.data_sources[train_set.sources.index('features')].shape[1:]
+    if len(in_dim) > 1 and p.whiten_zca > 0:
+        assert numpy.product(in_dim) == p.whiten_zca, \
+            'Need %d whitening dimensions, not %d' % (numpy.product(in_dim),
+                                                      p.whiten_zca)
+
+    # 归一化参数如果不为空，创建归一化类
+    cnorm = ContrastNorm(p.contrast_norm) if p.contrast_norm != 0 else None
+
+    def get_data(d, i):
+        data = d.get_data(request=i)[d.sources.index('features')]
+
+        # Fuel provides Cifar in uint8, convert to float32
+        # 检查data集合中的item是否符合float32类型
+        data = numpy.require(data, dtype=numpy.float32)
+        # TODO ContrastNorm.apply
+        return data if cnorm is None else cnorm.apply(data)
+
+    if p.whiten_zca > 0:
+        logger.info('Whitening using %d ZCA components' % p.whiten_zca)
+        # TODO ZCA
+        whiten = ZCA()
+        whiten.fit(p.whiten_zca, get_data(d.train, d.train_ind))
+    else:
+        whiten = None
+
+    return in_dim, d, whiten, cnorm
 
 
 def setup_model(p):
@@ -194,215 +217,91 @@ def setup_model(p):
     return ladder
 
 
-def load_and_log_params(cli_params):
-    cli_params = AttributeDict(cli_params)
-    if cli_params.get('load_from'):
-        p = load_df(cli_params.load_from, 'params').to_dict()[0]
-        p = AttributeDict(p)
-        for key in cli_params.iterkeys():
-            if key not in p:
-                p[key] = None
-        new_params = cli_params
-        loaded = True
+def unify_labels(y):
+    """ Work-around for Fuel bug where MNIST and Cifar-10
+    datasets have different dimensionalities for the targets:
+    e.g. (50000, 1) vs (60000,) """
+    yshape = y.shape
+    # 将多维数据扁平化成一维数据
+    y = y.flatten()
+    assert y.shape[0] == yshape[0]
+    return y
+
+def make_datastream(dataset, indices, batch_size,
+                    n_labeled=None, n_unlabeled=None,
+                    balanced_classes=True, whiten=None, cnorm=None,
+                    scheme=ShuffledScheme):
+    if n_labeled is None or n_labeled == 0:
+        n_labeled = len(indices)
+    if batch_size is None:
+        batch_size = len(indices)
+    if n_unlabeled is None:
+        n_unlabeled = len(indices)
+
+    # 未标记数据要少于标记数据
+    assert n_labeled <= n_unlabeled, 'need less labeled than unlabeled'
+
+    if balanced_classes and n_labeled < n_unlabeled:
+        # Ensure each label is equally represented
+        logger.info('Balancing %d labels...' % n_labeled)
+        all_data = dataset.data_sources[dataset.sources.index('targets')]
+        y = unify_labels(all_data)[indices]
+        # class的数量为y+1
+        n_classes = y.max() + 1
+
+        print(n_classes)
+
+        assert n_labeled % n_classes == 0
+        # 每个类有多少个样本都是一样的
+        n_from_each_class = n_labeled / n_classes
+
+        i_labeled = []
+        for c in range(n_classes):
+            i = (indices[y == c])[:n_from_each_class]
+            i_labeled += list(i)
     else:
-        p = cli_params
-        new_params = {}
-        loaded = False
+        i_labeled = indices[:n_labeled]
 
-        # Make dseed seed unless specified explicitly
-        if p.get('dseed') is None and p.get('seed') is not None:
-            p['dseed'] = p['seed']
+    # Get unlabeled indices
+    i_unlabeled = indices[:n_unlabeled]
 
-    logger.info('== COMMAND LINE ==')
-    logger.info(' '.join(sys.argv))
+    # ds = SemiDataStream(
+    #     data_stream_labeled=Whitening(
+    #         DataStream(dataset),
+    #         iteration_scheme=scheme(i_labeled, batch_size),
+    #         whiten=whiten, cnorm=cnorm),
+    #     data_stream_unlabeled=Whitening(
+    #         DataStream(dataset),
+    #         iteration_scheme=scheme(i_unlabeled, batch_size),
+    #         whiten=whiten, cnorm=cnorm)
+    # )
 
-    logger.info('== PARAMETERS ==')
-    for k, v in p.iteritems():
-        if new_params.get(k) is not None:
-            p[k] = new_params[k]
-            replace_str = "<- " + str(new_params.get(k))
-        else:
-            replace_str = ""
-        logger.info(" {:20}: {:<20} {}".format(k, v, replace_str))
-    return p, loaded
+    ds = 0
 
-
-def setup_data(p, test_set=False):
-    dataset_class, training_set_size = {
-        'cifar10': (CIFAR10, 40000),
-        'mnist': (MNIST, 50000),
-    }[p.dataset]
-
-    # Allow overriding the default from command line
-    if p.get('unlabeled_samples') is not None:
-        training_set_size = p.unlabeled_samples
-
-    train_set = dataset_class("train")
-
-    # Make sure the MNIST data is in right format
-    if p.dataset == 'mnist':
-        d = train_set.data_sources[train_set.sources.index('features')]
-        assert numpy.all(d <= 1.0) and numpy.all(d >= 0.0), \
-            'Make sure data is in float format and in range 0 to 1'
-
-    # Take all indices and permutate them
-    all_ind = numpy.arange(train_set.num_examples)
-    if p.get('dseed'):
-        rng = numpy.random.RandomState(seed=p.dseed)
-        rng.shuffle(all_ind)
-
-    d = AttributeDict()
-
-    # Choose the training set
-    d.train = train_set
-    d.train_ind = all_ind[:training_set_size]
-
-    # Then choose validation set from the remaining indices
-    d.valid = train_set
-    d.valid_ind = numpy.setdiff1d(all_ind, d.train_ind)[:p.valid_set_size]
-    logger.info('Using %d examples for validation' % len(d.valid_ind))
-
-    # Only touch test data if requested
-    if test_set:
-        d.test = dataset_class("test")
-        d.test_ind = numpy.arange(d.test.num_examples)
-
-    # Setup optional whitening, only used for Cifar-10
-    in_dim = train_set.data_sources[train_set.sources.index('features')].shape[1:]
-    if len(in_dim) > 1 and p.whiten_zca > 0:
-        assert numpy.product(in_dim) == p.whiten_zca, \
-            'Need %d whitening dimensions, not %d' % (numpy.product(in_dim),
-                                                      p.whiten_zca)
-    cnorm = ContrastNorm(p.contrast_norm) if p.contrast_norm != 0 else None
-
-    def get_data(d, i):
-        data = d.get_data(request=i)[d.sources.index('features')]
-        # Fuel provides Cifar in uint8, convert to float32
-        data = numpy.require(data, dtype=numpy.float32)
-        return data if cnorm is None else cnorm.apply(data)
-
-    if p.whiten_zca > 0:
-        logger.info('Whitening using %d ZCA components' % p.whiten_zca)
-        whiten = ZCA()
-        whiten.fit(p.whiten_zca, get_data(d.train, d.train_ind))
-    else:
-        whiten = None
-
-    return in_dim, d, whiten, cnorm
+    return ds
 
 
-def get_error(args):
-    """ Calculate the classification error """
-    args['data_type'] = args.get('data_type', 'test')
-    args['no_load'] = 'g_'
 
-    targets, acts = analyze(args)
-    guess = numpy.argmax(acts, axis=1)
-    correct = numpy.sum(numpy.equal(guess, targets.flatten()))
-
-    return (1. - correct / float(len(guess))) * 100.
-
-
-def analyze(cli_params):
-    p, _ = load_and_log_params(cli_params)
-    _, data, whiten, cnorm = setup_data(p, test_set=True)
-    ladder = setup_model(p)
-
-    # Analyze activations
-    dset, indices, calc_batchnorm = {
-        'train': (data.train, data.train_ind, False),
-        'valid': (data.valid, data.valid_ind, True),
-        'test':  (data.test, data.test_ind, True),
-    }[p.data_type]
-
-    if calc_batchnorm:
-        logger.info('Calculating batch normalization for clean.labeled path')
-        main_loop = DummyLoop(
-            extensions=[
-                FinalTestMonitoring(
-                    [ladder.costs.class_clean, ladder.error.clean]
-                    + ladder.costs.denois.values(),
-                    make_datastream(data.train, data.train_ind,
-                                    # These need to match with the training
-                                    p.batch_size,
-                                    n_labeled=p.labeled_samples,
-                                    n_unlabeled=len(data.train_ind),
-                                    cnorm=cnorm,
-                                    whiten=whiten, scheme=ShuffledScheme),
-                    make_datastream(data.valid, data.valid_ind,
-                                    p.valid_batch_size,
-                                    n_labeled=len(data.valid_ind),
-                                    n_unlabeled=len(data.valid_ind),
-                                    cnorm=cnorm,
-                                    whiten=whiten, scheme=ShuffledScheme),
-                    prefix="valid_final", before_training=True),
-                ShortPrinting({
-                    "valid_final": OrderedDict([
-                        ('VF_C_class', ladder.costs.class_clean),
-                        ('VF_E', ladder.error.clean),
-                        ('VF_C_de', [ladder.costs.denois.get(0),
-                                     ladder.costs.denois.get(1),
-                                     ladder.costs.denois.get(2),
-                                     ladder.costs.denois.get(3)]),
-                    ]),
-                }, after_training=True, use_log=False),
-            ])
-        main_loop.run()
-
-    # Make a datastream that has all the indices in the labeled pathway
-    ds = make_datastream(dset, indices,
-                         batch_size=p.get('batch_size'),
-                         n_labeled=len(indices),
-                         n_unlabeled=len(indices),
-                         balanced_classes=False,
-                         whiten=whiten,
-                         cnorm=cnorm,
-                         scheme=SequentialScheme)
-
-    # We want out the values after softmax
-    outputs = ladder.act.clean.labeled.h[len(ladder.layers) - 1]
-
-    # Replace the batch normalization paramameters with the shared variables
-    if calc_batchnorm:
-        outputreplacer = TestMonitoring()
-        _, _,  outputs = outputreplacer._get_bn_params(outputs)
-
-    cg = ComputationGraph(outputs)
-    f = cg.get_theano_function()
-
-    it = ds.get_epoch_iterator(as_dict=True)
-    res = []
-    inputs = {'features_labeled': [],
-              'targets_labeled': [],
-              'features_unlabeled': []}
-    # Loop over one epoch
-    for d in it:
-        # Store all inputs
-        for k, v in d.iteritems():
-            inputs[k] += [v]
-        # Store outputs
-        res += [f(*[d[str(inp)] for inp in cg.inputs])]
-
-    # Concatenate all minibatches
-    res = [numpy.vstack(minibatches) for minibatches in zip(*res)]
-    inputs = {k: numpy.vstack(v) for k, v in inputs.iteritems()}
-
-    return inputs['targets_labeled'], res[0]
-
-
+# 训练分类器
 def train(cli_params):
     cli_params['save_dir'] = prepare_dir(cli_params['save_to'])
-    logfile = os.path.join(cli_params['save_dir'], 'log.txt')
 
+    # log设定相关，无视 START
+    logfile = os.path.join(cli_params['save_dir'], 'log.txt')
     # Log also DEBUG to a file
     fh = logging.FileHandler(filename=logfile)
     fh.setLevel(logging.DEBUG)
     logger.addHandler(fh)
-
     logger.info('Logging into %s' % logfile)
+    # log设定相关，无视 END
 
+    # 读取并记录命令行参数，参数都塞入p里面
     p, loaded = load_and_log_params(cli_params)
+
+    # 根据参数和环境变量FUEL_DATA_PATH读取数据
     in_dim, data, whiten, cnorm = setup_data(p, test_set=False)
+
+    #
     if not loaded:
         # Set the zero layer to match input dimensions
         p.encoder_layers = (in_dim,) + p.encoder_layers
@@ -413,6 +312,9 @@ def train(cli_params):
     all_params = ComputationGraph([ladder.costs.total]).parameters
     logger.info('Found the following parameters: %s' % str(all_params))
 
+    # all_params里面有一堆参数名类似的东西具体还不知道有什么作用
+
+    # 用于batch norm的参数
     # Fetch all batch normalization updates. They are in the clean path.
     bn_updates = ComputationGraph([ladder.costs.class_clean]).updates
     assert 'counter' in [u.name for u in bn_updates.keys()], \
@@ -422,6 +324,7 @@ def train(cli_params):
         cost=ladder.costs.total, params=all_params,
         step_rule=Adam(learning_rate=ladder.lr))
     # In addition to actual training, also do BN variable approximations
+    # batchnorm参数近似
     training_algorithm.add_updates(bn_updates)
 
     short_prints = {
@@ -499,23 +402,25 @@ def train(cli_params):
         ])
     main_loop.run()
 
-    # Get results
-    df = main_loop.log.to_dataframe()
-    col = 'valid_final_error_rate_clean'
-    logger.info('%s %g' % (col, df[col].iloc[-1]))
-
-    if main_loop.log.status['epoch_interrupt_received']:
-        return None
-    return df
-
 if __name__ == "__main__":
+
+    # 配置记录器
     logging.basicConfig(level=logging.INFO)
 
+    # 这里定义了一堆后面要用到的lambda表达式，基本上都是用于字符转换的
+    # 将字符串中的'-'转换为','
     rep = lambda s: s.replace('-', ',')
+
+    # 切割字符串，分割符为','
     chop = lambda s: s.split(',')
+
+    # 转换为int
     to_int = lambda ss: [int(s) for s in ss if s.isdigit()]
+
+    # 转换为float
     to_float = lambda ss: [float(s) for s in ss]
 
+    # 转换为布尔值
     def to_bool(s):
         if s.lower() in ['true', 't']:
             return True
@@ -524,15 +429,18 @@ if __name__ == "__main__":
         else:
             raise Exception("Unknown bool value %s" % s)
 
+    # 参数的单星号代表传入的是一个tuple，有多个一元值。
+    # 如果是两个信号这代表传入的是一个dict，有多个二元值（值对）。
+    # funs中有三个值，分别带入f、g、x，然后运算f(g(x))。
     def compose(*funs):
         return functools.reduce(lambda f, g: lambda x: f(g(x)), funs)
 
+    # 不知道是啥
     # Functional parsing logic to allow flexible function compositions
     # as actions for ArgumentParser
     def funcs(additional_arg):
-        class customAction(Action):
+        class CustomAction(Action):
             def __call__(self, parser, args, values, option_string=None):
-
                 def process(arg, func_list):
                     if arg is None:
                         return None
@@ -540,19 +448,21 @@ if __name__ == "__main__":
                         return map(compose(*func_list), arg)
                     else:
                         return compose(*func_list)(arg)
-
                 setattr(args, self.dest, process(values, additional_arg))
-        return customAction
+        return CustomAction
 
+    # 命令行参数
     def add_train_params(parser, use_defaults):
         a = parser.add_argument
         default = lambda x: x if use_defaults else None
-
+        # nargs="?" means we don't know how many parameters been requested
         # General hyper parameters and settings
+        # 状态和结果的保存位置
         a("save_to", help="Destination to save the state and results",
           default=default("noname"), nargs="?")
         a("--num-epochs", help="Number of training epochs",
           type=int, default=default(150))
+        # nargs="+" means must give at least one parameter
         a("--seed", help="Seed",
           type=int, default=default([1]), nargs='+')
         a("--dseed", help="Data permutation seed, defaults to 'seed'",
@@ -569,6 +479,7 @@ if __name__ == "__main__":
           type=float, default=default([0.67]), nargs='+')
         a("--batch-size", help="Minibatch size",
           type=int, default=default([100]), nargs='+')
+        # validation
         a("--valid-batch-size", help="Minibatch size for validation data",
           type=int, default=default([100]), nargs='+')
         a("--valid-set-size", help="Number of examples in validation set",
@@ -577,6 +488,7 @@ if __name__ == "__main__":
         # Hyperparameters controlling supervised path
         a("--super-noise-std", help="Noise added to supervised learning path",
           type=float, default=default([0.3]), nargs='+')
+        # unsupervised learning
         a("--f-local-noise-std", help="Noise added encoder path",
           type=str, default=default([0.3]), nargs='+',
           action=funcs([tuple, to_float, chop]))
@@ -602,7 +514,11 @@ if __name__ == "__main__":
         a("--whiten-zca", help="Whether to whiten the data with ZCA",
           type=int, default=default([0]), nargs='+')
 
-    ap = ArgumentParser("Semisupervised experiment")
+    # UPD every parameter's get theirself default value. this will rewrite first parameter of method
+    # ap = ArgumentParser("Semi-supervised experiment")
+    ap = ArgumentParser(description="Semi-supervised experiment")
+
+    # create a sub parser
     subparsers = ap.add_subparsers(dest='cmd', help='sub-command help')
 
     # TRAIN
@@ -616,8 +532,10 @@ if __name__ == "__main__":
     load_cmd.add_argument('--data-type', type=str, default='test',
                           help="Data set to evaluate on")
 
+    # 编译命令行参数
     args = ap.parse_args()
 
+    # 运行'git rev-parse HEAD'，需要.git文件
     subp = subprocess.Popen(['git', 'rev-parse', 'HEAD'],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
@@ -626,28 +544,37 @@ if __name__ == "__main__":
     if err.strip():
         logger.error('Subprocess returned %s' % err.strip())
 
+    # 计时器开始
     t_start = time.time()
-    if args.cmd == 'evaluate':
-        for k, v in vars(args).iteritems():
-            if type(v) is list:
-                assert len(v) == 1, "should not be a list when loading: %s" % k
-                logger.info("%s" % str(v[0]))
-                vars(args)[k] = v[0]
 
-        err = get_error(vars(args))
-        logger.info('Test error: %f' % err)
-
-    elif args.cmd == "train":
+    # 进入训练流程
+    if args.cmd == "train":
+        # 参数是数组的放在这个dict里
         listdicts = {k: v for k, v in vars(args).iteritems() if type(v) is list}
+
+        # 参数不是数组的放在这里
         therest = {k: v for k, v in vars(args).iteritems() if type(v) is not list}
 
+        # 打印参数 START
+        # for k in listdicts:
+        #     print('parameter:' + k + ' | value:' + str(listdicts[k]))
+        # 打印参数 END
+
+        # 感觉是去掉了单个值的伪装，即把只有一个值的tuple打开，去掉tuple这层壳
+        # 逻辑有点复杂，可以简单点处理
         gen1, gen2 = tee(product(*listdicts.itervalues()))
 
         l = len(list(gen1))
         for i, d in enumerate(dict(izip(listdicts, x)) for x in gen2):
             if l > 1:
                 logger.info('Training configuration %d / %d' % (i+1, l))
+
+            # 更新therest中的d
             d.update(therest)
+
+            # 训练开始
             if train(d) is None:
                 break
+
+    # 计时器结束
     logger.info('Took %.1f minutes' % ((time.time() - t_start) / 60.))
