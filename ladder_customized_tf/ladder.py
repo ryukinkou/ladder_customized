@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+
+# bugfix 必须先行引入，否则会报错
+import numpy
+import matplotlib.image as mpimg
+
+import sys
 import tensorflow as tf
 from tensorflow.python import control_flow_ops
 import input_data
@@ -6,38 +13,68 @@ import os
 import csv
 from tqdm import tqdm
 
+# 每一层的神经元数量，都是全链接层
+# 第一层为输入层，28*28
 layer_sizes = [784, 1000, 500, 250, 250, 250, 10]
 
-L = len(layer_sizes) - 1 # number of layers
+# number of layers
+# 层的数量
+L = len(layer_sizes) - 1
 
-num_examples = 60000
+# 总样本数，0有10000个，1-9
+# 未标记样本数量为60000个（5000*10），标记样本数量为1000个（100*10）
+num_examples = 60000 + 1000
+
+# 全样本扫描循环次数
+# 样本数量庞大，通过设定mini batch的大小分批扫描，所有样本都扫描一次算一次全样本扫描
 num_epochs = 150
-num_labeled = 100
 
+# 类别数量
+num_labeled = 10
+
+# 冷启动的lr值
 starter_learning_rate = 0.02
 
-decay_after = 15 # epoch after which to begin learning rate decay
+# 经历15次全样本扫描后，lr值开始衰减
+# epoch after which to begin learning rate decay
+decay_after = 15
 
+# mini batch的大小
 batch_size = 100
-num_iter = (num_examples/batch_size) * num_epochs # number of loop iterations
 
+# ( 总样本数 / mini_batch = 一次全样本扫描所需要的批次 ) * 全样本扫描次数 = 总的循环次数
+# number of loop iterations
+num_iter = (num_examples/batch_size) * num_epochs
+
+# 为输入值的张量分配一块内存区域，类型为float32，shape为一维数组，数组长度为输入层神经元个数
 inputs = tf.placeholder(tf.float32, shape=(None, layer_sizes[0]))
+# 为输出值的张量分配一块内存区域，大小暂时未定
 outputs = tf.placeholder(tf.float32)
 
+# 创建两个lambda，用于初始化偏置参数与权重
 bi = lambda inits, size, name: tf.Variable(inits * tf.ones([size]), name=name)
 wi = lambda shape, name: tf.Variable(tf.random_normal(shape, name=name)) / math.sqrt(shape[0])
 
-shapes = zip(layer_sizes[:-1], layer_sizes[1:]) # shapes of linear layers
+# 制作层依赖pair making
+# shapes of linear layers
+shapes = zip(layer_sizes[:-1], layer_sizes[1:])
 
+# 编码器（监督学习）权值 W
+# 解码器（无监督学习）全职 V
+# batch norn中用于重构变换过程的beta
+# batch norn中用于重构变换过程的gamma
 weights = {'W': [wi(s, "W") for s in shapes], # Encoder weights
            'V': [wi(s[::-1], "V") for s in shapes], # Decoder weights
            'beta': [bi(0.0, layer_sizes[l+1], "beta") for l in range(L)], # batch normalization parameter to shift the normalized value
            'gamma': [bi(1.0, layer_sizes[l+1], "beta") for l in range(L)]} # batch normalization parameter to scale the normalized value
 
+# 噪点scale值
 noise_std = 0.3 # scaling factor for noise used in corrupted encoder
 
+# 去噪用的cost值
 denoising_cost = [1000.0, 10.0, 0.10, 0.10, 0.10, 0.10, 0.10] # hyperparameters that denote the importance of each layer
 
+# 合并两个二维tensor，0代表行合并，1代表列合并
 join = lambda l, u: tf.concat(0, [l, u])
 labeled = lambda x: tf.slice(x, [0, 0], [batch_size, -1]) if x is not None else x
 unlabeled = lambda x: tf.slice(x, [batch_size, 0], [-1, -1]) if x is not None else x
@@ -188,6 +225,9 @@ with tf.control_dependencies([train_step]):
 
 print "===  Loading Data ==="
 mnist = input_data.read_data_sets("MNIST_data", n_labeled = num_labeled, one_hot=True)
+
+num_labeled = num_labeled
+#num_labeled = 1002
 
 saver = tf.train.Saver()
 

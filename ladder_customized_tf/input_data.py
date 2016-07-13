@@ -1,10 +1,14 @@
+# -*- coding: utf-8 -*-
+
 """Functions for downloading and reading MNIST data."""
 from __future__ import print_function
+
+import numpy
+import matplotlib.image as mpimg
+
 import gzip
 import os
 import urllib
-
-import numpy
 
 SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
 
@@ -41,6 +45,7 @@ def extract_images(filename):
     buf = bytestream.read(rows * cols * num_images)
     data = numpy.frombuffer(buf, dtype=numpy.uint8)
     data = data.reshape(num_images, rows, cols, 1)
+
     return data
 
 
@@ -145,6 +150,7 @@ class SemiDataSet(object):
         self.num_examples = self.unlabeled_ds.num_examples
         indices = numpy.arange(self.num_examples)
         shuffled_indices = numpy.random.permutation(indices)
+        # 打散顺序
         images = images[shuffled_indices]
         labels = labels[shuffled_indices]
         y = numpy.array([numpy.arange(10)[l==1][0] for l in labels])
@@ -155,9 +161,38 @@ class SemiDataSet(object):
         for c in range(n_classes):
             i = indices[y==c][:n_from_each_class]
             i_labeled += list(i)
+
+        # i_labeled = [0, 19]
         l_images = images[i_labeled]
         l_labels = labels[i_labeled]
+
+        # # TODO START ADD INTWEEN DATA
+        # def rgb2gray(rgb):
+        #     return numpy.dot(rgb[..., :3], [0.299 * 255, 0.587 * 255, 0.114 * 255])
+        #
+        # list_dirs = os.walk("intween")
+        # for root, dirs, files in list_dirs:
+        #     for d in dirs:
+        #         print("dir: " + os.path.join(root, d))
+        #     for f in files:
+        #         print("file: " + os.path.join(root, f))
+        #         image_name = os.path.join(root, f)
+        #         image_origin = mpimg.imread(image_name)
+        #         image_gray = rgb2gray(image_origin)
+        #         image_array = image_gray.astype("uint8")
+        #         image_array = [numpy.array([numpy.array([image_array[row][col]]) for col in range(28)]) for row in range(28)]
+        #         image_array = numpy.array([numpy.array(image_array)])
+        #         l_images = numpy.concatenate((l_images, image_array))
+        #         bin_label = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        #         bin_label_index = int(root.replace("intween/", ""))
+        #         bin_label[bin_label_index] = 1.0
+        #         bin_label = numpy.array([numpy.array(bin_label)])
+        #         l_labels = numpy.concatenate((l_labels, bin_label))
+        # # TODO END
+
         self.labeled_ds = DataSet(l_images, l_labels)
+
+        print(self.labeled_ds)
 
     def next_batch(self, batch_size):
         unlabeled_images, _ = self.unlabeled_ds.next_batch(batch_size)
