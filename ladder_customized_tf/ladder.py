@@ -76,9 +76,13 @@ denoising_cost = [1000.0, 10.0, 0.10, 0.10, 0.10, 0.10, 0.10] # hyperparameters 
 
 # 合并两个二维tensor，0代表行合并，1代表列合并
 join = lambda l, u: tf.concat(0, [l, u])
+
 labeled = lambda x: tf.slice(x, [0, 0], [batch_size, -1]) if x is not None else x
+
 unlabeled = lambda x: tf.slice(x, [batch_size, 0], [-1, -1]) if x is not None else x
+
 split_lu = lambda x: (labeled(x), unlabeled(x))
+
 
 training = tf.placeholder(tf.bool)
 
