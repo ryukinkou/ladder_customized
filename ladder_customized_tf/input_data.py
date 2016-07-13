@@ -167,6 +167,7 @@ class SemiDataSet(object):
         l_labels = labels[i_labeled]
 
         # # TODO START ADD INTWEEN DATA
+        # ADD
         # def rgb2gray(rgb):
         #     return numpy.dot(rgb[..., :3], [0.299 * 255, 0.587 * 255, 0.114 * 255])
         #
