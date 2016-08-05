@@ -25,28 +25,72 @@ def maybe_download(filename, work_directory):
   return filepath
 
 
+# 读取4个byte，以big endian顺，这是mnist特有的封装方式
 def _read32(bytestream):
-  dt = numpy.dtype(numpy.uint32).newbyteorder('>')
-  return numpy.frombuffer(bytestream.read(4), dtype=dt)
+    dt = numpy.dtype(numpy.uint32).newbyteorder('>')
+    return numpy.frombuffer(bytestream.read(4), dtype=dt)
 
 
 def extract_images(filename):
-  """Extract the images into a 4D uint8 numpy array [index, y, x, depth]."""
-  print('Extracting', filename)
-  with gzip.open(filename) as bytestream:
-    magic = _read32(bytestream)
-    if magic != 2051:
-      raise ValueError(
-          'Invalid magic number %d in MNIST image file: %s' %
-          (magic, filename))
-    num_images = _read32(bytestream)
-    rows = _read32(bytestream)
-    cols = _read32(bytestream)
-    buf = bytestream.read(rows * cols * num_images)
-    data = numpy.frombuffer(buf, dtype=numpy.uint8)
-    data = data.reshape(num_images, rows, cols, 1)
+    """Extract the images into a 4D uint8 numpy array [index, y, x, depth]."""
+    print('Extracting', filename)
+    with gzip.open(filename) as bytestream:
+        magic = _read32(bytestream)
+        if magic != 2051:
+            raise ValueError(
+                'Invalid magic number %d in MNIST image file: %s' % (magic, filename))
+        num_images = _read32(bytestream)
+        rows = _read32(bytestream)
+        cols = _read32(bytestream)
+        buf = bytestream.read(rows * cols * num_images)
+        data = numpy.frombuffer(buf, dtype=numpy.uint8)
+        data = data.reshape(num_images, rows, cols, 1)
+        return data
 
-    return data
+
+def rgb2gray(rgb):
+    return numpy.dot(rgb[..., :3], [0.299 * 255, 0.587 * 255, 0.114 * 255])
+
+
+def read_tween_images(filename):
+
+    """keep same output structure of extract_images function"""
+
+    merged_data_list = []
+    cols = 0
+    rows = 0
+    file_nums = 0
+    dirs_nums = 0
+
+    for root, dirs, files in os.walk(filename):
+
+        dirs.sort()
+        if dirs_nums == 0:
+            dirs_nums = len(dirs)
+
+        for f in sorted(files):
+
+            sample_name = os.path.join(root, f)
+            rgb = mpimg.imread(sample_name)
+            gray_scale = rgb2gray(rgb)
+            # dim measurement
+            if cols == 0 or rows == 0 or file_nums == 0:
+                file_nums = len(files) * dirs_nums
+                rows = len(gray_scale)
+                cols = len(gray_scale[0])
+
+            data_list = gray_scale.reshape(1, gray_scale.size).tolist()
+            merged_data_list.extend(data_list[0])
+
+    boxed_data_list = numpy.array(merged_data_list, dtype=numpy.uint8)
+    boxed_data_list = boxed_data_list.reshape(file_nums, rows, cols, 1)
+
+    return boxed_data_list
+
+
+if __name__ == "__main__":
+    extract_images("/home/ryu/PycharmProjects/ladder/ladder_customized_tf/MNIST_data/train-images-idx3-ubyte.gz")
+    read_tween_images("/home/ryu/PycharmProjects/ladder/ladder_customized_tf/tween_data")
 
 
 def dense_to_one_hot(labels_dense, num_classes=10):
@@ -204,42 +248,47 @@ class SemiDataSet(object):
         images = numpy.vstack([labeled_images, unlabeled_images])
         return images, labels
 
-def read_data_sets(train_dir, n_labeled = 100, fake_data=False, one_hot=False):
-  class DataSets(object):
-    pass
-  data_sets = DataSets()
 
-  if fake_data:
-    data_sets.train = DataSet([], [], fake_data=True)
-    data_sets.validation = DataSet([], [], fake_data=True)
-    data_sets.test = DataSet([], [], fake_data=True)
+# 读取数据集处理
+def read_data_sets(train_dir, n_labeled=100, fake_data=False, one_hot=False):
+    class DataSets(object):
+        pass
+    data_sets = DataSets()
+
+    if fake_data:
+        data_sets.train = DataSet([], [], fake_data=True)
+        data_sets.validation = DataSet([], [], fake_data=True)
+        data_sets.test = DataSet([], [], fake_data=True)
+        return data_sets
+
+    TRAIN_IMAGES = 'train-images-idx3-ubyte.gz'
+    TRAIN_LABELS = 'train-labels-idx1-ubyte.gz'
+    TEST_IMAGES = 't10k-images-idx3-ubyte.gz'
+    TEST_LABELS = 't10k-labels-idx1-ubyte.gz'
+    VALIDATION_SIZE = 0
+
+    local_file = maybe_download(TRAIN_IMAGES, train_dir)
+    train_images = extract_images(local_file)
+
+    local_file = maybe_download(TRAIN_LABELS, train_dir)
+    train_labels = extract_labels(local_file, one_hot=one_hot)
+
+    local_file = maybe_download(TEST_IMAGES, train_dir)
+    test_images = extract_images(local_file)
+
+    local_file = maybe_download(TEST_LABELS, train_dir)
+    test_labels = extract_labels(local_file, one_hot=one_hot)
+
+    # 读取intween标记数据
+    # train_intween_images =
+
+    validation_images = train_images[:VALIDATION_SIZE]
+    validation_labels = train_labels[:VALIDATION_SIZE]
+    train_images = train_images[VALIDATION_SIZE:]
+    train_labels = train_labels[VALIDATION_SIZE:]
+
+    data_sets.train = SemiDataSet(train_images, train_labels, n_labeled)
+    data_sets.validation = DataSet(validation_images, validation_labels)
+    data_sets.test = DataSet(test_images, test_labels)
+
     return data_sets
-
-  TRAIN_IMAGES = 'train-images-idx3-ubyte.gz'
-  TRAIN_LABELS = 'train-labels-idx1-ubyte.gz'
-  TEST_IMAGES = 't10k-images-idx3-ubyte.gz'
-  TEST_LABELS = 't10k-labels-idx1-ubyte.gz'
-  VALIDATION_SIZE = 0
-
-  local_file = maybe_download(TRAIN_IMAGES, train_dir)
-  train_images = extract_images(local_file)
-
-  local_file = maybe_download(TRAIN_LABELS, train_dir)
-  train_labels = extract_labels(local_file, one_hot=one_hot)
-
-  local_file = maybe_download(TEST_IMAGES, train_dir)
-  test_images = extract_images(local_file)
-
-  local_file = maybe_download(TEST_LABELS, train_dir)
-  test_labels = extract_labels(local_file, one_hot=one_hot)
-
-  validation_images = train_images[:VALIDATION_SIZE]
-  validation_labels = train_labels[:VALIDATION_SIZE]
-  train_images = train_images[VALIDATION_SIZE:]
-  train_labels = train_labels[VALIDATION_SIZE:]
-
-  data_sets.train = SemiDataSet(train_images, train_labels, n_labeled)
-  data_sets.validation = DataSet(validation_images, validation_labels)
-  data_sets.test = DataSet(test_images, test_labels)
-
-  return data_sets
